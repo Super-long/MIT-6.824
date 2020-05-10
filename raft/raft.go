@@ -19,7 +19,6 @@ package raft
 
 import (
 	"MapReduce/6.824/src/labrpc"
-	"fmt"
 	"log"
 	"math/rand"
 	"sync"
@@ -251,6 +250,7 @@ func (rf *Raft) handleVoteResult(reply RequestVoteReply) { // 2A
 				rf.matchIndex[i] = -1          //这里还不清楚是干什么的
 			}
 			rf.SendAppendEntriesToAllFollwer() // 发送心跳包 确定leader地位
+			//fmt.Printf("重新选举成功 %d 成为leader Term 为 %d \n",rf.me,rf.currentTerm)
 			rf.resetTimer()                    // 重置超时事件
 		}
 		return
@@ -369,7 +369,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.logs = append(rf.logs, nlog) // 提交一个命令其实就是向日志里面添加一项 在心跳包的时候同步
 
 	//fmt.Printf("leader append log [leader=%d], [term=%d], [command=%v]\n",
-		//rf.me, rf.currentTerm, command)
+	//rf.me, rf.currentTerm, command)
 
 	index = len(rf.logs)
 	term = rf.currentTerm
@@ -459,6 +459,7 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, reply *AppendEntryReply) {
 		rf.resetTimer()
 		return
 	} else {
+		//fmt.Printf("%d 在Term %d 中接到消息附加日志或者心跳包 leader Term为%d\n",rf.me,rf.currentTerm, args.Term)
 		rf.current_state = "FOLLOWER" // 改变当前状态
 		rf.currentTerm = args.Term    // 落后于leader的时候更新Term
 		rf.votedFor = -1
@@ -505,7 +506,7 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, reply *AppendEntryReply) {
 			}
 			reply.Success = true
 		}
-
+		//TODO fmt.Printf("rf.me %d , Term %d, 是否成功 %t\n",rf.me,rf.currentTerm, reply.Success)
 		rf.resetTimer()
 	}
 }
@@ -542,7 +543,7 @@ func (rf *Raft) handleAppendEntries(server int, reply AppendEntryReply) {
 	defer rf.mu.Unlock()
 
 	if rf.current_state != "LEADER" {
-		log.Fatal("Error in handleAppendEntries, receive a heartbeat reply, but not a leader.")
+		//log.Fatal("Error in handleAppendEntries, receive a heartbeat reply, but not a leader.")
 		return
 	}
 
@@ -561,7 +562,7 @@ func (rf *Raft) handleAppendEntries(server int, reply AppendEntryReply) {
 		if rf.nextIndex[server] > len(rf.logs){ //debug
 			rf.nextIndex[server] = len(rf.logs)
 			rf.matchIndex[server] = rf.nextIndex[server] - 1
-			fmt.Printf("2ERROR : %d %d \n",rf.nextIndex[server] , len(rf.logs))
+			//fmt.Printf("2ERROR : %d %d \n",rf.nextIndex[server] , len(rf.logs))
 			//log.Fatal("ERROR : rf.nextIndex[server] > len(rf.logs)\n")
 		}
 
@@ -577,11 +578,13 @@ func (rf *Raft) handleAppendEntries(server int, reply AppendEntryReply) {
 				commit_count++
 			}
 		}
+		// TODO fmt.Printf("%d 在Term %d 中, 有 %d 个节点同意\n",rf.me, rf.currentTerm, commit_count)
 
 		//fmt.Printf("rf.matchIndex[server] %d %d\n",rf.matchIndex[server],len(rf.logs))
 		if commit_count >= len(rf.peers)/2+1 &&
 			rf.commitIndex < rf.matchIndex[server] && //保证幂等性 即同一条日志正常只会commit一次
 			rf.logs[rf.matchIndex[server]].Term == rf.currentTerm{
+			//fmt.Printf("在Term : %d 中, index : %d 的日志已经提交\n", rf.currentTerm, server)
 			rf.commitIndex = rf.matchIndex[server]
 			go rf.commitLogs() //提交日志 下次心跳的时候会提交follower中的日志
 		}
@@ -591,11 +594,12 @@ func (rf *Raft) handleAppendEntries(server int, reply AppendEntryReply) {
 
 		if rf.nextIndex[server] > len(rf.logs){ //debug
 			rf.nextIndex[server] = len(rf.logs)
-			fmt.Printf("1ERROR : %d %d \n",rf.nextIndex[server] , len(rf.logs))
+			//fmt.Printf("1ERROR : %d %d \n",rf.nextIndex[server] , len(rf.logs))
 			//log.Fatal("ERROR : rf.nextIndex[server] > len(rf.logs)\n")
 		}
-		rf.SendAppendEntriesToAllFollwer() //TODO 发送心跳包 其实发送单个人即可 后面再改
+		rf.SendAppendEntriesToAllFollwer() //TODO 发送心跳包 其实发送单个人即可 有问题后面再改
 	}
+	rf.resetTimer() // TODO 很重要 要不后面不发心跳包 导致不停的选举 Term往上飙
 }
 
 //
