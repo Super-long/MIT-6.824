@@ -19,6 +19,8 @@ package raft
 
 import (
 	"MapReduce/6.824/src/labrpc"
+	"bytes"
+	"encoding/gob"
 	"log"
 	"math/rand"
 	"sync"
@@ -111,6 +113,16 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.logs)
+
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -123,6 +135,13 @@ func (rf *Raft) readPersist(data []byte) {
 	// d := gob.NewDecoder(r)
 	// d.Decode(&rf.xxx)
 	// d.Decode(&rf.yyy)
+
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+
+	d.Decode(&rf.currentTerm)
+	d.Decode(&rf.votedFor)
+	d.Decode(&rf.logs)
 }
 
 //
@@ -154,6 +173,8 @@ func (rf *Raft) handleTimer() { // 超时事件 // 2A
 		rf.currentTerm += 1            // Term加1
 		rf.votedFor = rf.me            // 票投给自己handleTimer
 		rf.votes_counts = 1            // 目前有一票
+
+		rf.persist() // 2C
 
 		args := RequestVoteArgs{
 			Term:         rf.currentTerm,   // 请求者的纪元
@@ -189,7 +210,7 @@ func (rf *Raft) handleTimer() { // 超时事件 // 2A
 	rf.resetTimer() // 重置超时事件
 }
 
-func (rf *Raft) resetTimer() {
+func (rf *Raft) resetTimer() {// 2A 2B
 	if rf.timer != nil {
 		rf.timer.Stop()
 	}
@@ -300,6 +321,8 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) { // 
 		if voting {
 			rf.votedFor = args.CandidateId
 		}
+		rf.persist() // 2C
+
 		rf.resetTimer() //重置超时事件
 		reply.Term = args.Term
 		reply.VoteGranted = (rf.votedFor == args.CandidateId)
@@ -310,6 +333,8 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) { // 
 	if args.Term == rf.currentTerm {
 		if rf.votedFor == -1 && voting { // 未投过票且日志没有问题 可以投票
 			rf.votedFor = args.CandidateId
+
+			rf.persist() // 2C
 		}
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = (rf.votedFor == args.CandidateId)
@@ -374,11 +399,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index = len(rf.logs)
 	term = rf.currentTerm
 
+	rf.persist() // 2C
+
 	return index, term, isLeader
 }
 
 // append log 的args和reply
-type AppendEntryArgs struct {
+type AppendEntryArgs struct { // 2B
 	Term         int        // leader的任期号
 	LeaderId     int        // leaderID 便于进行重定向
 	PrevLogIndex int        // 新日志之前日志的索引值
@@ -387,18 +414,19 @@ type AppendEntryArgs struct {
 	LeaderCommit int        // leader已经提交的日志的索引
 }
 
-type AppendEntryReply struct {
+type AppendEntryReply struct { // 2B
 	Term        int  // 用于更新leader本身 因为leader可能会出现分区
 	Success     bool // follower如果跟上了PrevLogIndex,PrevLogTerm的话为true,否则的话需要与leader同步日志
 	CommitIndex int  // 用于返回与leader.Term的匹配项,方便同步日志
 }
 
+// 2B
 func (rf *Raft) SendAppendEntryToFollower(server int, args AppendEntryArgs, reply *AppendEntryReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
 
-// 用于发送附加日志项给其他服务器 也就是心跳包 超时时间为heartbeatTimeout
+// 用于发送附加日志项给其他服务器 也就是心跳包 超时时间为heartbeatTimeout // 2B
 func (rf *Raft) SendAppendEntriesToAllFollwer() {
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
@@ -448,7 +476,7 @@ func (rf *Raft) SendAppendEntriesToAllFollwer() {
 	 中的日志项并提交日志
  * 4.如果RPC请求中的日志项为空，则说明该RPC请求为Heartbeat，改变当前节点状态,因为可能此节点当前还是CANDIDATE,并提交未提交的日志
 */
-func (rf *Raft) AppendEntries(args AppendEntryArgs, reply *AppendEntryReply) {
+func (rf *Raft) AppendEntries(args AppendEntryArgs, reply *AppendEntryReply) {// 2B
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -507,12 +535,13 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, reply *AppendEntryReply) {
 			reply.Success = true
 		}
 		//TODO fmt.Printf("rf.me %d , Term %d, 是否成功 %t\n",rf.me,rf.currentTerm, reply.Success)
+		rf.persist() // 2C
 		rf.resetTimer()
 	}
 }
 
 // 提交日志
-func (rf *Raft) commitLogs() {
+func (rf *Raft) commitLogs() { // 2B
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -538,7 +567,7 @@ func (rf *Raft) commitLogs() {
  */
 // nextIndex  []int // 对于每一个服务器，需要发送给他的下一个日志条目的索引值
 // matchIndex []int // 对于每一个服务器，已经复制给他的日志的最高索引值
-func (rf *Raft) handleAppendEntries(server int, reply AppendEntryReply) {
+func (rf *Raft) handleAppendEntries(server int, reply AppendEntryReply) {// 2B
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -655,6 +684,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+
+	rf.persist() // 2C
 
 	return rf
 }
