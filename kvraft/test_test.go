@@ -234,7 +234,7 @@ func GenericTest(t *testing.T, tag string, nclients int, unreliable bool, crash 
 	fmt.Printf("  ... Passed\n")
 }
 
-func TestBasic(t *testing.T) {
+/*func TestBasic(t *testing.T) {
 	fmt.Printf("Test: One client ...\n")
 	GenericTest(t, "basic", 1, false, false, false, -1)
 }
@@ -392,7 +392,7 @@ func TestPersistPartition(t *testing.T) {
 func TestPersistPartitionUnreliable(t *testing.T) {
 	fmt.Printf("Test: persistence with concurrent clients and repartitioning servers, unreliable...\n")
 	GenericTest(t, "persistpartunreliable", 5, true, true, true, -1)
-}
+}*/
 
 //
 // if one server falls behind, then rejoins, does it

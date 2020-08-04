@@ -2,10 +2,12 @@ package raftkv
 
 import (
 	"MapReduce/6.824/src/labrpc"
+	"fmt"
+
 	//	"fmt"
 
-	"math/big"
 	"crypto/rand"
+	"math/big"
 	mrand "math/rand"
 	"sync"
 	"time"
@@ -67,7 +69,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 //
 // 默认一次执行一个 所以不需要加锁
 func (ck *Clerk) Get(key string) string {
-	//fmt.Printf("%d Clerk: Get: %q, seq is %d\n", ck.ClientID, key, ck.seq)
+	fmt.Printf("%d Clerk: Get: %q, seq is %d\n", ck.ClientID, key, ck.seq)
 	// You will have to modify this function.
 	serverLength := len(ck.servers)
 	for {
@@ -112,9 +114,9 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
-	//fmt.Printf("Clerk: PutAppend: %q => (%q,%q) from: %d; seq is %d\n", op, key, value, ck.ClientID, ck.seq)
+	fmt.Printf("Clerk: PutAppend: %q => (%q,%q) from: %d; seq is %d\n", op, key, value, ck.ClientID, ck.seq)
 	serverLength := len(ck.servers)
-	for {
+	for{
 		args := &PutAppendArgs{key, value, op, ck.ClientID, ck.seq}
 		reply := new(PutAppendReply)
 		ck.leader %= serverLength
@@ -124,15 +126,15 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			replyArrival <- ok
 		}()
 		select {
-		case <-time.After(3 * time.Second):
-			ck.leader++
-			continue
 		case ok := <-replyArrival:
 			if ok && !reply.WrongLeader && (reply.Err == OK || reply.Err == Duplicate) {
 				ck.seq++
 				return
 			} // 重新发送请求就是返回值为ReElection
 			ck.leader++
+		case <-time.After(3 * time.Second): // TODO 这样的下次数据会产生新的日志index
+			ck.leader++
+			continue
 		}
 	}
 }
