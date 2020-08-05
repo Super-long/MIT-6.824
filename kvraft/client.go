@@ -3,9 +3,6 @@ package raftkv
 import (
 	"MapReduce/6.824/src/labrpc"
 	"fmt"
-
-	//	"fmt"
-
 	"crypto/rand"
 	"math/big"
 	mrand "math/rand"
@@ -79,23 +76,31 @@ func (ck *Clerk) Get(key string) string {
 		ck.leader %= serverLength //得到此次通信的leader
 		replyArrival := make(chan bool)
 		go func() {
+			//fmt.Printf("此次发送serverID %d; clientID %d, seq : %d, \n",ck.leader,ck.ClientID, ck.seq)
 			ok := ck.servers[ck.leader].Call("RaftKV.Get", args, reply)
+			//fmt.Printf("服务器 %d， 返回 ： %t\n",ck.leader,ok)
 			replyArrival <- ok
 		}()
+
+		// TODO 问题出现在此时对0和1发送的包不返回
 		select {
 		case ok := <-replyArrival:
-			if ok && !reply.WrongLeader {
-				if reply.Err == OK || reply.Err == Duplicate || reply.Err == ErrNoKey {
+			if ok {
+				if reply.Err == OK || reply.Err == ErrNoKey || reply.Err == Duplicate {
 					ck.seq++
 					//fmt.Println("得到数据 : " + reply.Value)
 					return reply.Value
-				} else { // ReElection 我们需要重新发送请求 即重新选主
+				} else if reply.Err == ReElection || reply.Err == NoLeader{ // ReElection 我们需要重新发送请求 即重新选主
 					ck.leader++
 				}
-			} else if reply.Err == NoLeader {
+			} else {
+				//fmt.Println(reply.Err)
+				//if reply.Err == Duplicate{
+				//ck.seq++
+				//}
 				ck.leader++
 			}
-		case <- time.After(3 * time.Second): // 超时以后当然也要重新发送了
+		case <-time.After(3 * time.Second): // 超时以后当然也要重新发送了
 			ck.leader++
 			continue
 		}
@@ -116,7 +121,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
 	fmt.Printf("Clerk: PutAppend: %q => (%q,%q) from: %d; seq is %d\n", op, key, value, ck.ClientID, ck.seq)
 	serverLength := len(ck.servers)
-	for{
+	for {
 		args := &PutAppendArgs{key, value, op, ck.ClientID, ck.seq}
 		reply := new(PutAppendReply)
 		ck.leader %= serverLength

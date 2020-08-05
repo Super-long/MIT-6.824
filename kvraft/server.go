@@ -72,17 +72,18 @@ func StopTimer(arg *time.Timer) {
 // A: 这个匪夷所思的bug出现在分区的时候，所以不难解释了，因为我没有开始加超时，所以这个分区永远恢复不了
 // 而且超时时间的选择一定要远长于一次正常的交互时长，否则每次重试都会启动一个定时器，发很多的重复操作
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
+	//fmt.Printf("server get : %s clientseq : %d\n",args.Key, args.Clientseq)
 	// Your code here.
 	//fmt.Printf("%d server: Get: %q, seq is %d\n",args.ClientID,args.Key,args.Clientseq)
 	if _, IsLeader := kv.rf.GetState(); !IsLeader {
-		//fmt.Println("server no leader")
+		fmt.Printf("server %d not a leader\n",kv.rf.Getme())
 		reply.Err = NoLeader
 		reply.WrongLeader = true
 		return
 	}
 
 	kv.mu.Lock()
-	if rep, ok := kv.ClientSeqCache[args.ClientID]; ok { // 重复请求
+	if rep, ok := kv.ClientSeqCache[args.ClientID]; ok { // 重复请求 请求未被提交前会继续发送
 		if args.Clientseq <= rep.Seq {
 			//fmt.Printf("重复请求 get %d %d\n",args.Clientseq,rep.Seq)
 			kv.mu.Unlock()
@@ -108,8 +109,10 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	case <-kv.Shutdown:
 		return
 	case <-Notice:
+		fmt.Printf("serverID %d : get已经返回\n",args.ClientID)
 		CurrentTerm, Isleader := kv.rf.GetState()
 		if !Isleader || term != CurrentTerm {
+			//fmt.Printf("isleader : %t, currentTerm : %d, Term : %d\n",Isleader, CurrentTerm, term)
 			reply.WrongLeader = true
 			reply.Err = ReElection // 可能在提交之前重选也可能提交之后重选，所以需要重新发送
 			return
@@ -139,7 +142,7 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// TODO 对于重复请求，只需要在commit时更新就好，如果在为commit之前就去重会导致如果消息丢失就没有办法了
 	// 其中维护了clientID和seq，所以可以在commit中去重
 	if rep, ok := kv.ClientSeqCache[args.ClientID]; ok { // 检测请求是否重复
-		fmt.Printf("putappend %d %d\n",args.Clientseq,rep.Seq)
+		//fmt.Printf("putappend %d %d\n",args.Clientseq,rep.Seq)
 		if args.Clientseq <= rep.Seq {
 
 			kv.mu.Unlock()
@@ -152,9 +155,10 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	reply.WrongLeader = false
 	reply.Err = OK
 	NewOperation := Op{args.Key, args.Value, args.Op, args.ClientID, args.Clientseq}
-	fmt.Printf("key : %s\n",args.Key)
+	//fmt.Printf("key : %s\n",args.Key)
 	index, term, _ := kv.rf.Start(NewOperation) // 当做一个日志传入Raft，返回这条命令的日志index和当前的term
 	// 此时我们需要一个通知机制，在这个日志被提交的时候通知我们，但是不能直接观测applyCh，因为PutAppend可能会并发调用
+	index = index - 1	// 返回的index其实是大于1的
 	Notice := make(chan struct{})
 	kv.LogIndexNotice[index] = Notice
 	kv.mu.Unlock()
@@ -225,16 +229,29 @@ func (kv *RaftKV) DealWithapplyCh() {
 			DPrintf("[%d]: server %d is shutting down.\n", kv.me, kv.me)
 			return
 		case msg, ok := <-kv.applyCh: // 当数据被提交以后就从applyCh中被返回
+
+			//fmt.Printf("数据已经提交 ----------- %d\n", msg.Index)
 			if ok { // 这里可能得到两种数据，一个是操作，一个是快照
 				if msg.UseSnapshot{
-					kv.mu.Lock()
-					defer kv.mu.Unlock()
-					kv.readSnapshot(msg.Snapshot)
-					kv.persisterSnapshot(msg.Index)	// 可以避免在接到快照还没来得及创建的时候又崩了，少一次网络传递
-					continue
+					go func() {
+						kv.mu.Lock()
+						defer kv.mu.Unlock()
+						kv.readSnapshot(msg.Snapshot)
+						kv.persisterSnapshot(msg.Index )	// 可以避免在接到快照还没来得及创建的时候又崩了，少一次网络传递
+					}()
 				}
 
-				if msg.Command != nil && msg.Index > kv.SnapshotsIndex{	// 一般来说不会出现这种情况，出现了就是bug
+				if msg.IsSnapshot{	// 对应与commit
+					if kv.isUpperThanMaxraftstate(){ // 返回true证明当前应该执行快照
+						kv.persisterSnapshot(msg.Index) // 此index以前的数据已经打包成快照了
+						//fmt.Printf("进行快照 %d\n",msg.Index)
+						kv.rf.CreateSnapshots(msg.Index- 1)	// 填上Raft中返回值的一个坑，就是返回的commitindex+1
+					}
+				}
+
+				// 一般来说不会出现这种情况，出现了就是bug (PS：后来还是出现了)
+				if msg.Command != nil && msg.Index > kv.SnapshotsIndex{
+					//fmt.Printf("接收到数据 ： %d;\n",msg.Index)
 					cmd := msg.Command.(Op)
 					//fmt.Printf("cmd.op %s; key %s ; value %s\n", cmd.Op, cmd.Key, cmd.Value)
 					kv.mu.Lock()
@@ -250,14 +267,11 @@ func (kv *RaftKV) DealWithapplyCh() {
 							kv.ClientSeqCache[cmd.ClientID] = &LatestReply{Seq: cmd.Clientseq}
 							//fmt.Printf("append数据成功 %q：%q \n",cmd.Key,cmd.Value)
 						case "Get":
+							//fmt.Printf("get 已经提交 %s : %s \n", cmd.Key, cmd.Value)
 							kv.ClientSeqCache[cmd.ClientID] = &LatestReply{Seq: cmd.Clientseq, Value: kv.KvDictionary[cmd.Key]}
 						default:
 							panic("Invalid Operation. Please check all cmd!")
 						}
-					}
-					if kv.isUpperThanMaxraftstate(){ // 返回true证明当前应该执行快照
-						kv.persisterSnapshot(msg.Index) // 此index以前的数据已经打包成快照了
-						kv.rf.CreateSnapshots(msg.Index - 1)	// 填上Raft中返回值的一个坑，就是返回的commitindex+1
 					}
 					if Notice, ok := kv.LogIndexNotice[msg.Index - 1]; ok && Notice != nil {
 						close(Notice)
@@ -265,8 +279,12 @@ func (kv *RaftKV) DealWithapplyCh() {
 					}
 					kv.mu.Unlock()
 				} else {
-					log.Fatal("ERROR: DealWithapplyCh() receive a lagging snapshots.(Should be intercepted by Raft)")
+					//fmt.Printf("msg.Index %d;  kv.SnapshotsIndex %d\n",msg.Index, kv.SnapshotsIndex)
+					// 多个客户端并发写入的时候会发生这种事情
+					// log.Fatal("ERROR: DealWithapplyCh() receive a lagging snapshots.(Should be intercepted by Raft)")
 				}
+			} else {
+				fmt.Println("----------------------------------")
 			}
 		}
 	}

@@ -23,6 +23,7 @@ import (
 	"encoding/gob"
 	"fmt"
 	"log"
+	"math"
 	"math/rand"
 	"sync"
 	"time"
@@ -43,6 +44,7 @@ type ApplyMsg struct {
 	Command     interface{}
 	UseSnapshot bool   // ignore for lab2; only used in lab3
 	Snapshot    []byte // ignore for lab2; only used in lab3
+	IsSnapshot  bool   // 用于在commitlog和DealWithapplyCh间避免死锁
 }
 
 //
@@ -103,6 +105,15 @@ func (rf *Raft) GetState() (int, bool) { // 2A
 	rf.mu.Unlock()
 
 	return term, isleader
+}
+
+// TODO debug用
+func (rf *Raft) Getme() int {
+	return rf.me
+}
+
+func (rf *Raft) LogLength() int {
+	return len(rf.logs) + rf.snapshotIndex - 1
 }
 
 //
@@ -282,7 +293,7 @@ func (rf *Raft) handleVoteResult(reply RequestVoteReply) { // 2A
 				}
 				rf.votedFor = -1
 				rf.nextIndex[i] = len(rf.logs) + rf.snapshotIndex // 把日志更新到和leader一样
-				rf.matchIndex[i] = -1          // 这里还不清楚是干什么的
+				rf.matchIndex[i] = rf.nextIndex[i] - 1            // TODO 这里做出了修改
 			}
 			rf.SendAppendEntriesToAllFollwer() // 发送心跳包 确定leader地位
 			//fmt.Printf("重新选举成功 %d 成为leader Term 为 %d \n",rf.me,rf.currentTerm)
@@ -422,8 +433,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	//fmt.Printf("leader append log [leader=%d], [term=%d], [command=%v]\n",
 	//rf.me, rf.currentTerm, command)
 
-	index = len(rf.logs) - 1 + rf.snapshotIndex
+	index = len(rf.logs) + rf.snapshotIndex
 	term = rf.currentTerm
+	fmt.Printf("index : %d\n", index)
 
 	rf.persist() // 2C
 
@@ -454,7 +466,8 @@ func (rf *Raft) SendAppendEntryToFollower(server int, args AppendEntryArgs, repl
 
 // 用于发送附加日志项给其他服务器 也就是心跳包 超时时间为heartbeatTimeout // 2B
 func (rf *Raft) SendAppendEntriesToAllFollwer() {
-
+	//fmt.Printf("leader : %d; len : %d; snapshotIndex : %d\n", rf.me, len(rf.logs),rf.snapshotIndex )
+	// TODO 下午要做的事情 0 1 日志已经是最新，此时get无法达成协议
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
@@ -482,7 +495,7 @@ func (rf *Raft) SendAppendEntriesToAllFollwer() {
 			args.PrevLogTerm = rf.logs[args.PrevLogIndex-rf.snapshotIndex].Term
 		}
 		// 当我们在Start中加入一条新日志的时候这里会在心跳包中发送出去
-		if rf.nextIndex[i] < len(rf.logs) +rf.snapshotIndex { // 刚成为leader的时候更新过 所以第一次entry为空
+		if rf.nextIndex[i] < len(rf.logs)+rf.snapshotIndex { // 刚成为leader的时候更新过 所以第一次entry为空
 			args.Entries = rf.logs[rf.nextIndex[i]-rf.snapshotIndex:] //如果日志小于leader的日志的话直接拷贝日志
 		}
 		args.LeaderCommit = rf.commitIndex
@@ -490,7 +503,7 @@ func (rf *Raft) SendAppendEntriesToAllFollwer() {
 		go func(servernumber int, args AppendEntryArgs, rf *Raft) {
 			var reply AppendEntryReply
 
-		retry:
+			//retry:
 
 			if rf.current_state != "LEADER" {
 				return
@@ -499,7 +512,8 @@ func (rf *Raft) SendAppendEntriesToAllFollwer() {
 			if ok {
 				rf.handleAppendEntries(servernumber, reply)
 			} else {
-				goto retry //附加日志失败的时候重新附加
+				//goto retry //附加日志失败的时候重新附加
+				// TODO 失败应该是分区时才会触发，此时不停的发送也没什么用处，不如等到每次心跳再发
 			}
 		}(i, args, rf)
 	}
@@ -516,10 +530,15 @@ func (rf *Raft) SendAppendEntriesToAllFollwer() {
  * 4.如果RPC请求中的日志项为空，则说明该RPC请求为Heartbeat，改变当前节点状态,因为可能此节点当前还是CANDIDATE,并提交未提交的日志
 */
 func (rf *Raft) AppendEntries(args AppendEntryArgs, reply *AppendEntryReply) { // 2B
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	// TODO lab3B 这里出现死锁
+	//fmt.Printf("hello world %d\n",rf.me )
+	//rf.mu.Lock()
+	//defer rf.mu.Unlock()
+	//fmt.Println("down")
 
+	//fmt.Printf("进入副本添加日志 rf.currentTerm %d :  args.PrevLogIndex %d\n",rf.currentTerm,args.PrevLogIndex)
 	if rf.currentTerm > args.Term {
+		//fmt.Printf("错误在这里rf.currentTerm %d :  args.Term %d\n",rf.currentTerm,args.Term)
 		reply.Success = false
 		reply.Term = rf.currentTerm
 		// 没必要重置时钟 因为出现一个节点收到落后于自己的Term我认为只可能在分区的时候,这个时候的这个leader其实没有什么意义
@@ -532,20 +551,38 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, reply *AppendEntryReply) { /
 		rf.votedFor = -1
 		reply.Term = rf.currentTerm
 
+		//fmt.Printf("serverID : %d; len : %d; snapshotIndex : %d; prevlogindex %d\n", rf.me, len(rf.logs),rf.snapshotIndex ,args.PrevLogIndex)
 		if args.PrevLogIndex >= 0 && // 首先leader有日志
-			(len(rf.logs)-1 < args.PrevLogIndex || // 此节点日志小于leader 也就是说下一行数组不会越界 即日志一定大于等于PrevLogIndex
-				rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm) { // 或者在相同index上日志不同
+			(len(rf.logs)-1+rf.snapshotIndex < args.PrevLogIndex || // 此节点日志小于leader 也就是说下一行数组不会越界 即日志一定大于等于PrevLogIndex
+				rf.logs[int(math.Max(float64(args.PrevLogIndex-rf.snapshotIndex), float64(0)))].Term != args.PrevLogTerm) { // 或者在相同index上日志不同
 			reply.CommitIndex = len(rf.logs) - 1 + rf.snapshotIndex
 			if reply.CommitIndex > args.PrevLogIndex {
 				reply.CommitIndex = args.PrevLogIndex //多出的日志一定会被舍弃掉 要和leader同步
+				// TODO 上面的max是为了防止一个leader下线（出现分区），新leader上台并没有那个落后节点的最新的prevlogindex，
+				// 但实际已经应用过安装快照了
+				if rf.snapshotIndex != 0 {
+					rf.persist()
+					rf.resetTimer()
+					return
+				}
 			}
 
+			//1 1 1 			 follower
+			//1 1 1 4 4 5 5 6 6  leader
+			// 当一个follower落后太多的时候(如上)，会导致直接键成-1
 			for reply.CommitIndex >= 0 {
-				if rf.logs[reply.CommitIndex - rf.snapshotIndex].Term != args.Term {
+				if reply.CommitIndex == rf.snapshotIndex { // 再减就越界了
+					break
+				}
+				if rf.logs[reply.CommitIndex-rf.snapshotIndex].Term != args.Term {
 					reply.CommitIndex--
 				} else {
 					break
 				}
+			}
+			if reply.CommitIndex < 0 {
+				fmt.Printf("ERROR : reply.CommitIndex %d\n", reply.CommitIndex)
+				reply.CommitIndex = 0
 			}
 			//返回false说明要此节点日志并没有更上leader,或者有多余或者不一样的地方
 			//出现的原因是这个节点以前可能是leader,在一些日志并没有提交之前就宕机了
@@ -555,10 +592,10 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, reply *AppendEntryReply) { /
 				rf.commitIndex = args.LeaderCommit
 				go rf.commitLogs() // 可能提交的日志落后与leader 同步一下日志
 			}
-			reply.CommitIndex = len(rf.logs) - 1
+			reply.CommitIndex = len(rf.logs) - 1 + rf.snapshotIndex
 			reply.Success = true
 		} else { //日志项不为空 与leader同步日志
-			rf.logs = rf.logs[:args.PrevLogIndex+1] // debug: 第一次调用PrevLogIndex为-1
+			rf.logs = rf.logs[:args.PrevLogIndex+1-rf.snapshotIndex] // debug: 第一次调用PrevLogIndex为-1
 			rf.logs = append(rf.logs, args.Entries...)
 
 			if rf.lastApplied+1 <= args.LeaderCommit {
@@ -579,9 +616,9 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, reply *AppendEntryReply) { /
 				 4 6 6 6
 			*/
 			// 相当于在第一个6的时候发送的是4
-			reply.CommitIndex = len(rf.logs) - 1
+			reply.CommitIndex = len(rf.logs) - 1 + rf.snapshotIndex
 			if args.LeaderCommit > rf.commitIndex {
-				if args.LeaderCommit < len(rf.logs)-1 {
+				if args.LeaderCommit < len(rf.logs)-1+rf.snapshotIndex {
 					reply.CommitIndex = args.LeaderCommit
 				}
 			}
@@ -594,23 +631,28 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, reply *AppendEntryReply) { /
 
 // 提交日志
 func (rf *Raft) commitLogs() { // 2B
-	rf.mu.Lock()
+	rf.mu.Lock() // 这个锁在其他地方被解开了
 	defer rf.mu.Unlock()
 
 	//TODO 写lab3的时候这里老是出现问题 难受
-	if rf.commitIndex > len(rf.logs)-1 + rf.snapshotIndex {
-		fmt.Printf("rf.commitIndex : %d; len(rf.logs)-1 : %d\n", rf.commitIndex, len(rf.logs)-1)
+	if rf.commitIndex > len(rf.logs)-1+rf.snapshotIndex {
 		log.Fatal("ERROR : raft.go commitlogs() 提交日志数大于已有的日志数 ")
 	}
-
+	//fmt.Printf("rf.me %d; rf.commitIndex : %d; len(rf.logs)-1 : %d; snapshotIndex %d;  rf.lastApplied %d\n",
+	//rf.me, rf.commitIndex, len(rf.logs)-1, rf.snapshotIndex, rf.lastApplied)
 	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ { //commit日志到与Leader相同
+		//fmt.Printf("rf.me %d; rf.发送的日志项% d\n",rf.me, i);
 		// listen to messages from Raft indicating newly committed messages.
-		// 调用过程才test_test.go -> start1函数中
 		//TODO https://pdos.csail.mit.edu/6.824/papers/raft-faq.txt 倒数第四个问题
-		rf.applyCh <- ApplyMsg{Index: i + 1, Command: rf.logs[i - rf.snapshotIndex].Command, UseSnapshot : false}
+		rf.applyCh <- ApplyMsg{Index: i + 1, IsSnapshot: false, Command: rf.logs[i-rf.snapshotIndex].Command, UseSnapshot: false}
 	}
+	// 这里会在server主动建立快照的时候出现死锁，所以我们需要在全部提交完以后发送一种特殊的消息
+	// 告诉server已经提交完，可以判断是否快照了，对应的，server也不是在每一条命令以后就判断是否创建快照，
+	// 而是在接收到这种特殊的消息以后才判断
 
 	rf.lastApplied = rf.commitIndex
+	// 当然这样就没办法过lab2了
+	rf.applyCh <- ApplyMsg{Index: rf.commitIndex + 1, IsSnapshot: true} // 收到这条消息以后再进行快照
 }
 
 // leader发送附加日志得到回复以后的处理函数
@@ -673,7 +715,7 @@ func (rf *Raft) handleAppendEntries(server int, reply AppendEntryReply) { // 2B
 		//fmt.Printf("rf.matchIndex[server] %d %d\n",rf.matchIndex[server],len(rf.logs))
 		if commit_count >= len(rf.peers)/2+1 &&
 			rf.commitIndex < rf.matchIndex[server] && //保证幂等性 即同一条日志正常只会commit一次
-			rf.logs[rf.matchIndex[server] - rf.snapshotIndex].Term == rf.currentTerm {
+			rf.logs[rf.matchIndex[server]-rf.snapshotIndex].Term == rf.currentTerm {
 			//fmt.Printf("在Term : %d 中, index : %d 的日志已经提交\n", rf.currentTerm, server)
 			rf.commitIndex = rf.matchIndex[server]
 			go rf.commitLogs() //提交日志 下次心跳的时候会提交follower中的日志
@@ -743,10 +785,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.electionTimeout = time.Millisecond * time.Duration(150+rand.Intn(150))
 	rf.heartbeatTimeout = time.Millisecond * time.Duration(50+rand.Intn(50))
 
+	rf.snapshotIndex = 0
+
 	rf.resetTimer()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	// 可能出现在3B的第二个测试，所有节点宕机重启，如果lastApplied是-1会在commitlog时越界
+	if rf.snapshotIndex > 0 { // 大于零代表已经有快照了
+		rf.lastApplied = rf.snapshotIndex
+	}
 
 	rf.persist() // 2C
 
@@ -760,12 +808,12 @@ func (rf *Raft) CreateSnapshots(index int) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	//fmt.Printf("index %d; commitindex %d\n", index, rf.commitIndex);
-	if rf.current_state != "LEADER" {
-		fmt.Println(rf.me)
-		fmt.Println("This node is not the leader now.")
-		return
+	if rf.current_state != "LEADER" { // 不是leader也应该存储快照
+		//fmt.Printf("%d is not the leader now.\n", rf.me)
+		//return
 	}
 	if index > rf.commitIndex {
+		//fmt.Printf("index %d; commitIndex %d;\n", index, rf.commitIndex)
 		panic("Error : Raft.CreateSnapshots(). snapshot index upper than commitindex.")
 	} else if index <= rf.snapshotIndex { // 忽略这条日志
 		fmt.Println("这是一条不应该出现的消息，我们应该直接丢弃")
@@ -776,7 +824,11 @@ func (rf *Raft) CreateSnapshots(index int) {
 	rf.snapshotIndex = index
 	rf.snapshotTerm = rf.logs[0].Term
 
+	//fmt.Printf("up 状态大小 ： %d\n", rf.persister.RaftStateSize())
+
 	rf.persist()
+
+	//fmt.Printf("down 状态大小 ： %d\n", rf.persister.RaftStateSize())
 }
 
 // InstallSnapShot RPC
@@ -818,7 +870,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotsArgs, reply *InstallSnapsh
 	rf.nextIndex[rf.me] = args.LastIncludedIndex + 1
 	rf.matchIndex[rf.me] = args.LastIncludedIndex
 
-	fmt.Printf("rf.me %d; rf.nextIndex[rf.me] : %d\n", rf.me, rf.nextIndex[rf.me])
+	//fmt.Printf("rf.me %d; rf.nextIndex[rf.me] : %d\n", rf.me, rf.nextIndex[rf.me])
 	if args.LastIncludedIndex >= rf.snapshotIndex+len(rf.logs)-1 {
 		rf.snapshotIndex = args.LastIncludedIndex
 		rf.snapshotTerm = args.LastIncludedTerm
@@ -826,7 +878,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotsArgs, reply *InstallSnapsh
 		rf.lastApplied = args.LastIncludedIndex
 		rf.logs = []LogEntry{{nil, rf.snapshotTerm}}
 		// 我们需要在kvserver中处理两种不同的情况
-		rf.applyCh <- ApplyMsg{rf.snapshotIndex, nil, true, args.Data}
+		rf.applyCh <- ApplyMsg{rf.snapshotIndex, nil, true, args.Data, false}
 	} else {
 		// 现在就剩下这种情况了
 		// [ |rf.snapshotIndex|   |args.LastIncludedIndex|  |rf.snapshotIndex + len(rf.logs) - 1| ]
@@ -836,10 +888,9 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotsArgs, reply *InstallSnapsh
 		rf.lastApplied = args.LastIncludedIndex
 		rf.snapshotIndex = args.LastIncludedIndex
 		rf.snapshotTerm = args.LastIncludedTerm
-		rf.applyCh <- ApplyMsg{rf.snapshotIndex, nil, true, args.Data}
+		rf.applyCh <- ApplyMsg{rf.snapshotIndex, nil, true, args.Data, false}
 	}
 	rf.persist()
-	fmt.Println("return")
 	return
 }
 
