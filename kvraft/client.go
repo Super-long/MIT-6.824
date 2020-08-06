@@ -2,8 +2,8 @@ package raftkv
 
 import (
 	"MapReduce/6.824/src/labrpc"
-	"fmt"
 	"crypto/rand"
+	"fmt"
 	"math/big"
 	mrand "math/rand"
 	"sync"
@@ -72,35 +72,36 @@ func (ck *Clerk) Get(key string) string {
 	for {
 		args := &GetArgs{key, ck.ClientID, ck.seq}
 		reply := new(GetReply)
-
+		//fmt.Printf("ck.leader 是 ： %d\n",ck.leader)
 		ck.leader %= serverLength //得到此次通信的leader
 		replyArrival := make(chan bool)
 		go func() {
 			//fmt.Printf("此次发送serverID %d; clientID %d, seq : %d, \n",ck.leader,ck.ClientID, ck.seq)
 			ok := ck.servers[ck.leader].Call("RaftKV.Get", args, reply)
-			//fmt.Printf("服务器 %d， 返回 ： %t\n",ck.leader,ok)
+			//fmt.Printf("服务器 %d， 返回 ： %t; value %s\n",ck.leader,ok,reply.Value)
 			replyArrival <- ok
 		}()
 
-		// TODO 问题出现在此时对0和1发送的包不返回
+		// TODO 每次发送的Get都会在第一次时超时，然后把所有的服务器都遍历一遍，很奇怪
 		select {
 		case ok := <-replyArrival:
 			if ok {
 				if reply.Err == OK || reply.Err == ErrNoKey || reply.Err == Duplicate {
 					ck.seq++
-					//fmt.Println("得到数据 : " + reply.Value)
+					//fmt.Printf("得到数据 : %s; leader %d\n", reply.Value, ck.leader)
 					return reply.Value
 				} else if reply.Err == ReElection || reply.Err == NoLeader{ // ReElection 我们需要重新发送请求 即重新选主
+					//fmt.Printf("Get 出现 ReElection || NoLeader --- ck.leader : %d\n",ck.leader)
 					ck.leader++
 				}
 			} else {
-				//fmt.Println(reply.Err)
 				//if reply.Err == Duplicate{
 				//ck.seq++
 				//}
 				ck.leader++
 			}
-		case <-time.After(3 * time.Second): // 超时以后当然也要重新发送了
+		case <-time.After(200 * time.Millisecond): // 超时以后当然也要重新发送了
+			//fmt.Printf("get %d; 重新发送; leader 为 ： %d\n",ck.ClientID ,ck.leader)
 			ck.leader++
 			continue
 		}
@@ -133,11 +134,12 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		select {
 		case ok := <-replyArrival:
 			if ok && !reply.WrongLeader && (reply.Err == OK || reply.Err == Duplicate) {
+				//fmt.Println("Putappend已返回")
 				ck.seq++
 				return
 			} // 重新发送请求就是返回值为ReElection
 			ck.leader++
-		case <-time.After(3 * time.Second): // TODO 这样的下次数据会产生新的日志index
+		case <-time.After(200 * time.Millisecond): // TODO 这样的下次数据会产生新的日志index
 			ck.leader++
 			continue
 		}

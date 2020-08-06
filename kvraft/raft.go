@@ -581,7 +581,7 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, reply *AppendEntryReply) { /
 				}
 			}
 			if reply.CommitIndex < 0 {
-				fmt.Printf("ERROR : reply.CommitIndex %d\n", reply.CommitIndex)
+				//fmt.Printf("ERROR : reply.CommitIndex %d\n", reply.CommitIndex)
 				reply.CommitIndex = 0
 			}
 			//返回false说明要此节点日志并没有更上leader,或者有多余或者不一样的地方
@@ -595,7 +595,16 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, reply *AppendEntryReply) { /
 			reply.CommitIndex = len(rf.logs) - 1 + rf.snapshotIndex
 			reply.Success = true
 		} else { //日志项不为空 与leader同步日志
-			rf.logs = rf.logs[:args.PrevLogIndex+1-rf.snapshotIndex] // debug: 第一次调用PrevLogIndex为-1
+			Temp := args.PrevLogIndex+1-rf.snapshotIndex
+			if Temp < 0{	// 这里可能会出现越界
+				reply.Success = false
+				reply.CommitIndex = rf.snapshotIndex
+				reply.Term = rf.snapshotTerm
+				fmt.Printf("args.PrevLogIndex+1 %d; rf.snapshotIndex %d\n",args.PrevLogIndex+1, rf.snapshotIndex)
+				return
+				//Temp = 0
+			}
+			rf.logs = rf.logs[:Temp] // debug: 第一次调用PrevLogIndex为-1
 			rf.logs = append(rf.logs, args.Entries...)
 
 			if rf.lastApplied+1 <= args.LeaderCommit {
@@ -636,6 +645,7 @@ func (rf *Raft) commitLogs() { // 2B
 
 	//TODO 写lab3的时候这里老是出现问题 难受
 	if rf.commitIndex > len(rf.logs)-1+rf.snapshotIndex {
+		fmt.Printf("rf.commitIndex %d; len(rf.logs)-1+rf.snapshotIndex %d\n",rf.commitIndex, len(rf.logs)-1+rf.snapshotIndex)
 		log.Fatal("ERROR : raft.go commitlogs() 提交日志数大于已有的日志数 ")
 	}
 	//fmt.Printf("rf.me %d; rf.commitIndex : %d; len(rf.logs)-1 : %d; snapshotIndex %d;  rf.lastApplied %d\n",
@@ -725,9 +735,9 @@ func (rf *Raft) handleAppendEntries(server int, reply AppendEntryReply) { // 2B
 		rf.nextIndex[server] = reply.CommitIndex + 1
 
 		if rf.nextIndex[server] > len(rf.logs)+rf.snapshotIndex { //debug
-			rf.nextIndex[server] = len(rf.logs) + rf.snapshotIndex
-			//fmt.Printf("1ERROR : %d %d \n",rf.nextIndex[server] , len(rf.logs))
+			fmt.Printf("737 1ERROR : %d %d \n",rf.nextIndex[server] ,len(rf.logs)+rf.snapshotIndex)
 			//log.Fatal("ERROR : rf.nextIndex[server] > len(rf.logs)\n")
+			rf.nextIndex[server] = len(rf.logs) + rf.snapshotIndex
 		}
 		//fmt.Printf("server %d, rf.nextIndex[server] %d\n", server, rf.nextIndex[server])
 		rf.SendAppendEntriesToAllFollwer() //TODO 发送心跳包 其实发送单个人即可 有问题后面再改
@@ -858,12 +868,12 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotsArgs, reply *InstallSnapsh
 	reply.Term = rf.currentTerm
 
 	if args.Term < rf.currentTerm { // 过期的请求
-		fmt.Println("过期的请求")
+		//fmt.Println("过期的请求")
 		return
 	}
 
 	if args.LastIncludedIndex <= rf.snapshotIndex { // 重复的快照
-		fmt.Println("重复的快照")
+		//fmt.Println("重复的快照")
 		return
 	}
 	// TODO 其实感觉是重复的，因为在server中收到RPC回复的时候回修改的
@@ -897,7 +907,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotsArgs, reply *InstallSnapsh
 func (rf *Raft) sendInstallSnapshotRPC(args *InstallSnapshotsArgs,
 	reply *InstallSnapshotsReply, serverID int) bool {
 	ok := rf.peers[serverID].Call("Raft.InstallSnapshot", args, reply)
-	//fmt.Println(ok)
 	return ok
 }
 

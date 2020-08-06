@@ -5,7 +5,6 @@ import (
 	"MapReduce/6.824/src/raft"
 	"bytes"
 	"encoding/gob"
-	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -76,7 +75,7 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	//fmt.Printf("%d server: Get: %q, seq is %d\n",args.ClientID,args.Key,args.Clientseq)
 	if _, IsLeader := kv.rf.GetState(); !IsLeader {
-		fmt.Printf("server %d not a leader\n",kv.rf.Getme())
+		//fmt.Printf("server %d not a leader\n",kv.rf.Getme())
 		reply.Err = NoLeader
 		reply.WrongLeader = true
 		return
@@ -109,7 +108,7 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	case <-kv.Shutdown:
 		return
 	case <-Notice:
-		fmt.Printf("serverID %d : get已经返回\n",args.ClientID)
+		//fmt.Printf("serverID %d : get已经返回\n",args.ClientID)
 		CurrentTerm, Isleader := kv.rf.GetState()
 		if !Isleader || term != CurrentTerm {
 			//fmt.Printf("isleader : %t, currentTerm : %d, Term : %d\n",Isleader, CurrentTerm, term)
@@ -251,9 +250,8 @@ func (kv *RaftKV) DealWithapplyCh() {
 
 				// 一般来说不会出现这种情况，出现了就是bug (PS：后来还是出现了)
 				if msg.Command != nil && msg.Index > kv.SnapshotsIndex{
-					//fmt.Printf("接收到数据 ： %d;\n",msg.Index)
 					cmd := msg.Command.(Op)
-					//fmt.Printf("cmd.op %s; key %s ; value %s\n", cmd.Op, cmd.Key, cmd.Value)
+					//fmt.Printf("recive message: cmd.op %s; key %s ; value %s\n", cmd.Op, cmd.Key, cmd.Value)
 					kv.mu.Lock()
 					// 这个新到的请求的序列必须大于seq，否则就是重复的
 					if rep, ok := kv.ClientSeqCache[cmd.ClientID]; !ok || rep.Seq < cmd.Clientseq {
@@ -265,7 +263,7 @@ func (kv *RaftKV) DealWithapplyCh() {
 						case "Append":
 							kv.KvDictionary[cmd.Key] = kv.KvDictionary[cmd.Key] + cmd.Value
 							kv.ClientSeqCache[cmd.ClientID] = &LatestReply{Seq: cmd.Clientseq}
-							//fmt.Printf("append数据成功 %q：%q \n",cmd.Key,cmd.Value)
+							//fmt.Printf("client %d; append数据成功 %q：%q \n",cmd.ClientID,cmd.Key,cmd.Value)
 						case "Get":
 							//fmt.Printf("get 已经提交 %s : %s \n", cmd.Key, cmd.Value)
 							kv.ClientSeqCache[cmd.ClientID] = &LatestReply{Seq: cmd.Clientseq, Value: kv.KvDictionary[cmd.Key]}
@@ -275,16 +273,17 @@ func (kv *RaftKV) DealWithapplyCh() {
 					}
 					if Notice, ok := kv.LogIndexNotice[msg.Index - 1]; ok && Notice != nil {
 						close(Notice)
-						delete(kv.LogIndexNotice, msg.Index)
+						delete(kv.LogIndexNotice, msg.Index - 1)
 					}
 					kv.mu.Unlock()
+
 				} else {
 					//fmt.Printf("msg.Index %d;  kv.SnapshotsIndex %d\n",msg.Index, kv.SnapshotsIndex)
 					// 多个客户端并发写入的时候会发生这种事情
 					// log.Fatal("ERROR: DealWithapplyCh() receive a lagging snapshots.(Should be intercepted by Raft)")
 				}
 			} else {
-				fmt.Println("----------------------------------")
+				//fmt.Println("----------------------------------")
 			}
 		}
 	}
